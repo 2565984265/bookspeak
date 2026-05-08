@@ -1,0 +1,42 @@
+{
+  "name": "bookspeak",
+  "version": "0.1.0",
+  "description": "通过阅读一本书学英语——阅读、词汇、口语三位一体",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .js,.jsx",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.22.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.2.1",
+    "eslint": "^8.56.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "prettier": "^3.2.5",
+    "vite": "^5.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/2565984265/bookspeak.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "language-learning",
+    "english",
+    "reading",
+    "speaking",
+    "vocabulary",
+    "open-source"
+  ]
+}
