@@ -1,8 +1,12 @@
+import Reader from '../components/Reader'
+import ErrorBoundary from '../components/ErrorBoundary'
+
 function ReaderPage() {
   return (
-    <div>
-      <h2>📖 阅读</h2>
-      {/* 书籍内容展示、分段阅读、查词、高亮 */}
+    <div className="reader-page">
+      <ErrorBoundary>
+        <Reader />
+      </ErrorBoundary>
     </div>
   )
 }

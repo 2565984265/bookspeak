@@ -1,18 +1,39 @@
-import { Outlet, Link } from 'react-router-dom'
+import { Outlet, Link, useLocation } from 'react-router-dom'
 
 function Layout() {
+  const location = useLocation()
+
+  const navItems = [
+    { path: '/', label: '🏠 首页' },
+    { path: '/reader', label: '📖 阅读' },
+    { path: '/vocab', label: '📝 生词本' },
+    { path: '/speak', label: '🎤 口语' },
+    { path: '/progress', label: '📊 进度' },
+    { path: '/settings', label: '⚙️ 设置' },
+  ]
+
   return (
     <div className="app">
       <nav className="sidebar">
-        <h1>📚 BookSpeak</h1>
-        <ul>
-          <li><Link to="/">首页</Link></li>
-          <li><Link to="/reader">阅读</Link></li>
-          <li><Link to="/vocab">生词本</Link></li>
-          <li><Link to="/speak">口语</Link></li>
-          <li><Link to="/progress">进度</Link></li>
-          <li><Link to="/settings">设置</Link></li>
+        <div className="sidebar-header">
+          <h1>📚 BookSpeak</h1>
+          <p className="tagline">阅读学英语</p>
+        </div>
+        <ul className="nav-list">
+          {navItems.map(item => (
+            <li key={item.path}>
+              <Link
+                to={item.path}
+                className={location.pathname === item.path ? 'active' : ''}
+              >
+                {item.label}
+              </Link>
+            </li>
+          ))}
         </ul>
+        <div className="sidebar-footer">
+          <small>v0.1.0 MVP</small>
+        </div>
       </nav>
       <main className="content">
         <Outlet />

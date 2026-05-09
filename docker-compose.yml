@@ -1,0 +1,33 @@
+# ========================================
+# BookSpeak 生产部署配置
+# 一键启动：docker-compose up -d --build
+# ========================================
+
+services:
+  # 后端：FastAPI + Edge TTS + Google 翻译
+  backend:
+    build: ./backend
+    container_name: bookspeak-backend
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - bookspeak-net
+
+  # 前端：Node 构建 React → Nginx 静态托管
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: bookspeak-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - bookspeak-net
+
+networks:
+  bookspeak-net:
+    driver: bridge
