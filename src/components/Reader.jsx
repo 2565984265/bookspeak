@@ -3,6 +3,7 @@ import { useBookStore } from '../hooks/useStore'
 import { useWordLookup } from '../hooks/useWordLookup'
 import { useEdgeTTS } from '../hooks/useEdgeTTS'
 import { resolveBackendUrl } from '../utils/backend'
+import { idbStorage } from '../utils/indexedDB'
 import WordTooltip from './WordTooltip'
 import WordHighlightLegend from './WordHighlightLegend'
 import BookmarkList from './BookmarkList'
@@ -38,6 +39,7 @@ function Reader() {
   const [showTranslation, setShowTranslation] = useState(() => localStorage.getItem('bookspeak_show_translation') === 'true')
   const [translations, setTranslations] = useState({})
   const [translatingIds, setTranslatingIds] = useState(new Set())
+  const [visibleParagraphs, setVisibleParagraphs] = useState(new Set())
 
   // v0.4: localStorage 中 currentBook 只有元数据，需从 IndexedDB 加载完整数据
   useEffect(() => {
@@ -83,13 +85,36 @@ function Reader() {
     }
   }, [currentChapter])
 
-  // Intersection Observer：滚动时自动保存当前可见段落为进度
+  // 章节切换时清空可见段落集合
+  useEffect(() => {
+    setVisibleParagraphs(new Set())
+  }, [currentChapter])
+
+  // 从 IndexedDB 加载当前章节的翻译缓存
+  useEffect(() => {
+    if (!currentBook?.id || paragraphs.length === 0) return
+    const load = async () => {
+      try {
+        const records = await idbStorage.getTranslationsByChapter(currentBook.id, currentChapter)
+        const map = {}
+        records.forEach(r => {
+          map[`${currentBook.id}_${currentChapter}_${r.paragraphIndex}`] = r.translation
+        })
+        setTranslations(map)
+      } catch (err) {
+        console.error('加载翻译缓存失败:', err)
+      }
+    }
+    load()
+  }, [currentBook?.id, currentChapter, paragraphs.length])
+
+  // Intersection Observer：滚动时自动保存进度 + 检测可见段落（用于按需翻译）
   useEffect(() => {
     if (!paragraphs.length) return
 
     const observer = new IntersectionObserver(
       (entries) => {
-        // 找到最靠近视口顶部的可见段落
+        // 保存进度：找到最靠近视口顶部的可见段落
         const visible = entries
           .filter(e => e.isIntersecting)
           .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
@@ -97,12 +122,23 @@ function Reader() {
         if (visible) {
           const idx = parseInt(visible.target.dataset.paragraphIndex, 10)
           if (!isNaN(idx)) {
-            // 只在段落变化时更新，避免频繁写入
             setProgress(currentChapter, idx)
           }
         }
+
+        // 更新可见段落集合（用于按需翻译）
+        setVisibleParagraphs(prev => {
+          const next = new Set(prev)
+          entries.forEach(e => {
+            const idx = parseInt(e.target.dataset.paragraphIndex, 10)
+            if (isNaN(idx)) return
+            if (e.isIntersecting) next.add(idx)
+            else next.delete(idx)
+          })
+          return next
+        })
       },
-      { threshold: 0.3, rootMargin: '-80px 0px -50% 0px' }
+      { threshold: 0.1, rootMargin: '200px 0px 200px 0px' }
     )
 
     Object.values(paragraphRefs.current).forEach(el => {
@@ -120,56 +156,85 @@ function Reader() {
     }
   }, [showTranslation])
 
-  // 批量翻译当前章节（限制并发，优先翻译当前段落附近）
+  // 按需翻译：只有段落进入视口（或即将进入）时才翻译
+  const backendBase = resolveBackendUrl(settings?.ttsBackendUrl)
+  const translatingIdsRef = useRef(translatingIds)
+  translatingIdsRef.current = translatingIds
+
   useEffect(() => {
-    if (!showTranslation || !paragraphs.length || !currentBook?.id) return
+    if (!showTranslation || visibleParagraphs.size === 0 || !currentBook?.id || !paragraphs.length) return
 
-    const TRANSLATION_CACHE_KEY = 'bookspeak_translation_cache_v1'
-    const getCache = () => { try { return JSON.parse(localStorage.getItem(TRANSLATION_CACHE_KEY)) || {} } catch { return {} } }
-    const setCache = (cache) => localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(cache))
-    const getKey = (idx) => `${currentBook.id}_${currentChapter}_${idx}`
-
-    const cache = getCache()
-    const toTranslate = []
-    for (let i = 0; i < paragraphs.length; i++) {
-      if (!cache[getKey(i)]) toTranslate.push(i)
-    }
-
-    // 优先翻译当前段落附近
-    toTranslate.sort((a, b) => Math.abs(a - currentParagraph) - Math.abs(b - currentParagraph))
-
-    let cancelled = false
-    const run = async () => {
-      for (const idx of toTranslate) {
-        if (cancelled) break
-        const key = getKey(idx)
-        setTranslatingIds(prev => new Set(prev).add(idx))
-        try {
-          const response = await fetch(`${resolveBackendUrl(settings?.ttsBackendUrl)}/translate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: paragraphs[idx].text.trim(),
-              source: 'auto',
-              target: 'zh-CN'
-            })
-          })
-          if (!response.ok) throw new Error('翻译失败')
-          const data = await response.json()
-          const translated = data?.TargetText || ''
-          cache[key] = translated
-          setCache(cache)
-          setTranslations(prev => ({ ...prev, [key]: translated }))
-        } catch (err) {
-          console.error('段落翻译失败:', err)
-        } finally {
-          setTranslatingIds(prev => { const next = new Set(prev); next.delete(idx); return next })
-        }
+    const timer = setTimeout(async () => {
+      // 获取已缓存的段落索引
+      let cachedIndices = new Set()
+      try {
+        const records = await idbStorage.getTranslationsByChapter(currentBook.id, currentChapter)
+        cachedIndices = new Set(records.map(r => r.paragraphIndex))
+      } catch (err) {
+        console.error('读取翻译缓存失败:', err)
       }
-    }
-    run()
-    return () => { cancelled = true }
-  }, [showTranslation, currentChapter, currentParagraph, paragraphs.length, currentBook?.id])
+
+      // 收集需要翻译的段落：可见段 + 前后各2段（预加载）
+      const toTranslate = new Set()
+      visibleParagraphs.forEach(idx => {
+        for (let i = Math.max(0, idx - 2); i <= Math.min(paragraphs.length - 1, idx + 2); i++) {
+          if (!cachedIndices.has(i) && !translatingIdsRef.current.has(i)) {
+            toTranslate.add(i)
+          }
+        }
+      })
+
+      if (toTranslate.size === 0) return
+
+      const indices = Array.from(toTranslate).sort((a, b) => a - b)
+      const texts = indices.map(idx => paragraphs[idx].text.trim())
+
+      // 标记正在翻译
+      setTranslatingIds(prev => {
+        const next = new Set(prev)
+        indices.forEach(i => next.add(i))
+        return next
+      })
+
+      try {
+        const response = await fetch(`${backendBase}/translate/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ texts, source: 'auto', target: 'zh-CN' })
+        })
+        if (!response.ok) throw new Error('批量翻译失败')
+        const data = await response.json()
+
+        const newTranslations = {}
+        for (let i = 0; i < indices.length; i++) {
+          const idx = indices[i]
+          const translated = data.results[i]?.translation || ''
+          const key = `${currentBook.id}_${currentChapter}_${idx}`
+          newTranslations[key] = translated
+
+          // 异步保存到 IndexedDB（不阻塞渲染）
+          idbStorage.saveTranslation({
+            bookId: currentBook.id,
+            chapterIndex: currentChapter,
+            paragraphIndex: idx,
+            originalText: paragraphs[idx].text,
+            translation: translated
+          }).catch(err => console.error('保存翻译缓存失败:', err))
+        }
+        setTranslations(prev => ({ ...prev, ...newTranslations }))
+      } catch (err) {
+        console.error('批量翻译失败:', err)
+      } finally {
+        setTranslatingIds(prev => {
+          const next = new Set(prev)
+          indices.forEach(i => next.delete(i))
+          return next
+        })
+      }
+    }, 300) // 防抖 300ms，避免滚动时频繁触发
+
+    return () => clearTimeout(timer)
+  }, [visibleParagraphs, showTranslation, currentBook?.id, currentChapter, paragraphs.length, backendBase])
 
   // 进度百分比（全书进度）
   const progressPercent = useMemo(() => {

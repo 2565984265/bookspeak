@@ -208,6 +208,12 @@ class DictLookupRequest(BaseModel):
     word: str = Field(..., min_length=1, description="要查词的英文单词")
 
 
+class BatchTranslateRequest(BaseModel):
+    texts: list[str] = Field(..., min_length=1, max_length=20, description="要翻译的文本列表（最多20段）")
+    source: str = Field(default="auto", description="源语言")
+    target: str = Field(default="zh-CN", description="目标语言")
+
+
 # ========== 接口 ==========
 @app.get("/")
 def root():
@@ -268,6 +274,27 @@ async def translate(req: TranslateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"翻译请求失败: {str(e)}")
+
+
+@app.post("/translate/batch")
+async def translate_batch(req: BatchTranslateRequest):
+    """
+    批量翻译接口：一次请求翻译多段文本，减少 HTTP 往返。
+    逐段查缓存，缓存未命中时串行调用 Google 翻译（避免触发频率限制）。
+    """
+    if not req.texts:
+        return {"results": []}
+
+    results = []
+    for text in req.texts:
+        try:
+            translated = await google_translate_text(text, req.source, req.target)
+            results.append({"text": text, "translation": translated})
+        except Exception as e:
+            print(f"[批量翻译失败] '{text[:50]}...': {e}")
+            results.append({"text": text, "translation": ""})
+
+    return {"results": results}
 
 @app.post("/dict")
 async def dict_lookup(req: DictLookupRequest):
