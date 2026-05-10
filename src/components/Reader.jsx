@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useBookStore } from '../hooks/useStore'
 import { useWordLookup } from '../hooks/useWordLookup'
 import { useEdgeTTS } from '../hooks/useEdgeTTS'
+import { resolveBackendUrl } from '../utils/backend'
 import WordTooltip from './WordTooltip'
 import WordHighlightLegend from './WordHighlightLegend'
 import BookmarkList from './BookmarkList'
@@ -144,7 +145,7 @@ function Reader() {
         const key = getKey(idx)
         setTranslatingIds(prev => new Set(prev).add(idx))
         try {
-          const response = await fetch(`${settings?.ttsBackendUrl ?? ''}/translate`, {
+          const response = await fetch(`${resolveBackendUrl(settings?.ttsBackendUrl)}/translate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

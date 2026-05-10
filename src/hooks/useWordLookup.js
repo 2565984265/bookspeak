@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useBookStore } from '../hooks/useStore'
+import { resolveBackendUrl } from '../utils/backend'
 
 /**
  * 查词 Hook（后端代理版）
@@ -27,7 +28,7 @@ export function useWordLookup() {
   const [error, setError] = useState(null)
 
   const settings = useBookStore(state => state.settings)
-  const backendUrl = settings?.ttsBackendUrl ?? ''
+  const backendUrl = resolveBackendUrl(settings?.ttsBackendUrl)
 
   /**
    * 查询单词释义（英文释义 + 中文翻译）

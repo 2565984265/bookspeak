@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import { useBookStore } from '../hooks/useStore'
+import { resolveBackendUrl } from '../utils/backend'
 
 /**
  * Edge TTS Hook（后端代理版）
@@ -16,7 +17,7 @@ export function useEdgeTTS() {
   const abortRef = useRef(false)
 
   const settings = useBookStore(state => state.settings)
-  const ttsBackendUrl = settings?.ttsBackendUrl ?? ''
+  const ttsBackendUrl = resolveBackendUrl(settings?.ttsBackendUrl)
 
   const stop = useCallback(() => {
     abortRef.current = true
