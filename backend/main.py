@@ -3,24 +3,88 @@ BookSpeak Backend
 提供 Edge TTS + Google 免费翻译服务
 """
 
+import asyncio
 import io
+import os
 import time
 import hmac
 import hashlib
 import json as json_mod
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 import edge_tts
 import httpx
-import re
 from deep_translator import GoogleTranslator
-from PyMultiDictionary import MultiDictionary
 import pronouncing
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+# ========== NLTK / WordNet 离线词典 ==========
+# 设置 NLTK 数据路径（支持开发和 Docker 环境）
+NLTK_DATA_PATHS = [
+    os.path.join(os.path.dirname(__file__), 'nltk_data'),
+    '/usr/local/share/nltk_data',
+    '/usr/share/nltk_data',
+]
+for p in NLTK_DATA_PATHS:
+    if os.path.exists(p):
+        os.environ['NLTK_DATA'] = p
+        break
+
+from nltk.corpus import wordnet as wn
+from nltk.stem import WordNetLemmatizer
+
+_wordnet_lemmatizer = None
+
+def get_lemmatizer():
+    global _wordnet_lemmatizer
+    if _wordnet_lemmatizer is None:
+        _wordnet_lemmatizer = WordNetLemmatizer()
+    return _wordnet_lemmatizer
+
+
+_POS_MAP = {'n': 'noun', 'v': 'verb', 'a': 'adjective', 'r': 'adverb', 's': 'adjective'}
+
+
+def get_wordnet_synsets(word: str):
+    """查询 WordNet，支持词形还原。返回 synsets 列表。"""
+    synsets = wn.synsets(word)
+    if not synsets:
+        lemmatizer = get_lemmatizer()
+        # 只对动词和名词尝试还原（最常见）
+        for pos in [wn.VERB, wn.NOUN]:
+            lemma = lemmatizer.lemmatize(word, pos=pos)
+            if lemma != word:
+                synsets = wn.synsets(lemma)
+                if synsets:
+                    break
+    return synsets
+
+
+def build_wordnet_meanings(synsets, max_total=8, max_per_pos=3):
+    """
+    将 WordNet synsets 组织成前端期望的结构。
+    max_total: 最多取多少个 synset
+    max_per_pos: 每个词性最多取多少个 definition
+    """
+    synsets = synsets[:max_total]
+    grouped = {}
+    for ss in synsets:
+        pos = _POS_MAP.get(ss.pos(), ss.pos())
+        if pos not in grouped:
+            grouped[pos] = []
+        defs = grouped[pos]
+        if len(defs) < max_per_pos:
+            defs.append({
+                "definition": ss.definition(),
+                "example": ss.examples()[0] if ss.examples() else "",
+                "definitionZh": ""
+            })
+    return [{"partOfSpeech": pos, "definitions": defs} for pos, defs in grouped.items()]
 
 app = FastAPI(
     title="BookSpeak Backend",
@@ -60,16 +124,6 @@ def get_translator():
     return _google_translator
 
 
-# 全局离线词典实例
-_offline_dict = None
-
-def get_offline_dict():
-    global _offline_dict
-    if _offline_dict is None:
-        _offline_dict = MultiDictionary()
-    return _offline_dict
-
-
 # ARPAbet 音素 → IPA 近似映射
 _ARPABET_TO_IPA = {
     'AA': 'ɑ', 'AE': 'æ', 'AH': 'ə', 'AO': 'ɔ', 'AW': 'aʊ',
@@ -92,55 +146,12 @@ def arpabet_to_ipa(phones: str) -> str:
     return result
 
 
-def parse_offline_meanings(word: str, meaning_result) -> list:
-    """
-    解析 PyMultiDictionary 的 meaning 结果，提取结构化 definition。
-    返回: [{"partOfSpeech": "verb", "definitions": [{"definition": "...", "example": "", "definitionZh": ""}]}]
-    """
-    parts_of_speech, definitions_text, _ = meaning_result
-    
-    if not definitions_text or len(definitions_text) < 10:
-        return []
-    
-    # 按句号分割
-    raw_sentences = [s.strip() for s in definitions_text.split('.') if s.strip()]
-    
-    # 去掉模板前缀
-    patterns = [
-        rf"The first definition of {re.escape(word)} in the dictionary is\s*",
-        rf"Other definition of {re.escape(word)} is\s*",
-        rf"{re.escape(word)} is also\s*",
-        rf"The definition of {re.escape(word)} in the dictionary is\s*",
-    ]
-    
-    definitions = []
-    for sentence in raw_sentences:
-        clean = sentence
-        for p in patterns:
-            clean = re.sub(p, "", clean, flags=re.IGNORECASE)
-        clean = clean.strip(" ;")
-        if clean and len(clean) > 3:
-            definitions.append({"definition": clean, "example": "", "definitionZh": ""})
-    
-    if not definitions:
-        return []
-    
-    # 按词性组织（PyMultiDictionary 可能返回多个词性，但释义是混在一起的）
-    # 简单处理：取第一个词性，所有 definition 放在下面
-    pos = parts_of_speech[0].lower() if parts_of_speech else "definition"
-    return [{
-        "partOfSpeech": pos,
-        "definitions": definitions[:3]
-    }]
-
-
 def get_word_phonetic(word: str) -> str:
     """用 pronouncing 库获取音标（IPA 近似）"""
     phones_list = pronouncing.phones_for_word(word)
     if phones_list:
         return "/" + arpabet_to_ipa(phones_list[0]) + "/"
     return ""
-
 
 def cache_key(text: str, source: str, target: str) -> str:
     return hashlib.md5(f"{text}:{source}:{target}".encode("utf-8")).hexdigest()
@@ -157,7 +168,7 @@ def set_cached_translation(text: str, source: str, target: str, result: str):
 
 
 async def google_translate_text(text: str, source="auto", target="zh-CN") -> str:
-    """调用 Google 免费翻译，带缓存"""
+    """调用 Google 免费翻译，带缓存。在线程池中执行避免阻塞事件循环。"""
     if not text or not text.strip():
         return ""
     
@@ -166,10 +177,10 @@ async def google_translate_text(text: str, source="auto", target="zh-CN") -> str
     if cached is not None:
         return cached
     
-    # 2. 调用 Google 翻译
+    # 2. 在线程池中调用 Google 翻译（避免阻塞 FastAPI 事件循环）
     try:
         translator = get_translator()
-        result = translator.translate(text.strip())
+        result = await asyncio.to_thread(translator.translate, text.strip())
         set_cached_translation(text, source, target, result)
         return result
     except Exception as e:
@@ -259,15 +270,14 @@ async def translate(req: TranslateRequest):
 @app.post("/dict")
 async def dict_lookup(req: DictLookupRequest):
     """
-    查词接口：PyMultiDictionary 离线词典 + pronouncing 音标 + Google 翻译
-    无需外部网络请求（除首次 Google 翻译外，有缓存）
+    查词接口：WordNet 离线词典 + pronouncing 音标 + Google 翻译
+    WordNet 查词毫秒级，无需外部网络请求
     """
     word = req.word.lower().strip()
 
-    # 1. 离线查词（PyMultiDictionary）
-    offline_dict = get_offline_dict()
-    meaning_result = offline_dict.meaning('en', word)
-    meanings = parse_offline_meanings(word, meaning_result)
+    # 1. WordNet 离线查词
+    synsets = get_wordnet_synsets(word)
+    meanings = build_wordnet_meanings(synsets)
     
     # 2. 音标（pronouncing）
     phonetic = get_word_phonetic(word)
@@ -279,7 +289,7 @@ async def dict_lookup(req: DictLookupRequest):
         "audio": "",  # 离线库不提供音频，前端可 fallback 到 edge-tts 朗读单词
         "meanings": meanings,
         "chineseTranslation": "",
-        "source": "offline"
+        "source": "wordnet"
     }
 
     # 4. Google 翻译：单词 + 所有释义 definition，拼接成一段一次性翻译

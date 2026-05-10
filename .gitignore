@@ -18,3 +18,7 @@ dist/
 # IDE
 .idea/
 .vscode/
+
+# NLTK data (downloaded at build time, do not commit)
+nltk_data/
+backend/nltk_data/

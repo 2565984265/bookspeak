@@ -8,6 +8,9 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
     && pip config set global.timeout 120 \
     && pip install --no-cache-dir -r requirements.txt
 
+# 下载 NLTK 数据（WordNet + OMW + tagger）
+RUN python -m nltk.downloader wordnet omw-1.4 averaged_perceptron_tagger
+
 # 复制应用代码
 COPY main.py .
 
