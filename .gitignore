@@ -19,6 +19,14 @@ dist/
 .idea/
 .vscode/
 
+# Python
+__pycache__/
+*.pyc
+
 # NLTK data (downloaded at build time, do not commit)
 nltk_data/
 backend/nltk_data/
+
+# ECDICT offline dictionary (downloaded at build time)
+backend/ecdict.db
+backend/ecdict.csv

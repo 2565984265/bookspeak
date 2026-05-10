@@ -1,6 +1,6 @@
 """
 BookSpeak Backend
-提供 Edge TTS + Google 免费翻译服务
+提供 Edge TTS + 离线英汉词典服务
 """
 
 import asyncio
@@ -22,6 +22,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+import ecdict_db
 
 # ========== NLTK / WordNet 离线词典 ==========
 # 设置 NLTK 数据路径（支持开发和 Docker 环境）
@@ -88,7 +90,7 @@ def build_wordnet_meanings(synsets, max_total=8, max_per_pos=3):
 
 app = FastAPI(
     title="BookSpeak Backend",
-    description="Edge TTS + Google 免费翻译",
+    description="Edge TTS + 离线英汉词典",
     version="0.3.0"
 )
 
@@ -209,7 +211,7 @@ class DictLookupRequest(BaseModel):
 # ========== 接口 ==========
 @app.get("/")
 def root():
-    return {"service": "BookSpeak", "version": "0.3.0", "features": ["tts", "translate", "dict"], "translate_engine": "google_free"}
+    return {"service": "BookSpeak", "version": "0.3.0", "features": ["tts", "translate", "dict"], "translate_engine": "google_free", "dict_engine": "ecdict"}
 
 
 @app.get("/voices")
@@ -270,59 +272,30 @@ async def translate(req: TranslateRequest):
 @app.post("/dict")
 async def dict_lookup(req: DictLookupRequest):
     """
-    查词接口：WordNet 离线词典 + pronouncing 音标 + Google 翻译
-    WordNet 查词毫秒级，无需外部网络请求
+    查词接口：优先 ECDICT 离线英汉词典，未命中时 fallback 到 WordNet + pronouncing
+    全程零外部网络请求
     """
     word = req.word.lower().strip()
 
-    # 1. WordNet 离线查词
+    # 1. 优先 ECDICT 离线英汉词典（76万词条，0.01ms 查询）
+    result = ecdict_db.lookup_fuzzy(word)
+    if result:
+        # ECDICT 已有音标，无需 pronouncing fallback
+        return result
+
+    # 2. ECDICT 未命中，fallback 到 WordNet + pronouncing
     synsets = get_wordnet_synsets(word)
     meanings = build_wordnet_meanings(synsets)
-    
-    # 2. 音标（pronouncing）
     phonetic = get_word_phonetic(word)
-    
-    # 3. 组装结果
-    result = {
+
+    return {
         "word": word,
         "phonetic": phonetic,
-        "audio": "",  # 离线库不提供音频，前端可 fallback 到 edge-tts 朗读单词
+        "audio": "",
         "meanings": meanings,
         "chineseTranslation": "",
         "source": "wordnet"
     }
-
-    # 4. Google 翻译：单词 + 所有释义 definition，拼接成一段一次性翻译
-    texts_to_translate = [word]
-    definition_positions = []
-
-    for mi, m in enumerate(result["meanings"]):
-        for di, d in enumerate(m["definitions"]):
-            if d.get("definition", "").strip():
-                texts_to_translate.append(d["definition"])
-                definition_positions.append((mi, di))
-
-    if len(texts_to_translate) > 1:
-        combined_text = "\n".join(texts_to_translate)
-        translated_combined = await google_translate_text(combined_text, "en", "zh-CN")
-
-        if translated_combined:
-            translated_lines = translated_combined.split("\n")
-            if len(translated_lines) > 0:
-                result["chineseTranslation"] = translated_lines[0].strip()
-            for idx, (mi, di) in enumerate(definition_positions):
-                line_idx = idx + 1
-                if line_idx < len(translated_lines):
-                    result["meanings"][mi]["definitions"][di]["definitionZh"] = translated_lines[line_idx].strip()
-    else:
-        result["chineseTranslation"] = await google_translate_text(word, "en", "zh-CN")
-
-    if not result["meanings"] and result["chineseTranslation"]:
-        result["source"] = "google"
-    elif not result["meanings"]:
-        result["source"] = "fallback"
-
-    return result
 
 
 @app.get("/dict")
