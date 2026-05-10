@@ -13,7 +13,10 @@ from typing import Optional
 
 import edge_tts
 import httpx
+import re
 from deep_translator import GoogleTranslator
+from PyMultiDictionary import MultiDictionary
+import pronouncing
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +58,88 @@ def get_translator():
     if _google_translator is None:
         _google_translator = GoogleTranslator(source="en", target="zh-CN")
     return _google_translator
+
+
+# 全局离线词典实例
+_offline_dict = None
+
+def get_offline_dict():
+    global _offline_dict
+    if _offline_dict is None:
+        _offline_dict = MultiDictionary()
+    return _offline_dict
+
+
+# ARPAbet 音素 → IPA 近似映射
+_ARPABET_TO_IPA = {
+    'AA': 'ɑ', 'AE': 'æ', 'AH': 'ə', 'AO': 'ɔ', 'AW': 'aʊ',
+    'AY': 'aɪ', 'B': 'b', 'CH': 'tʃ', 'D': 'd', 'DH': 'ð',
+    'EH': 'ɛ', 'ER': 'ɚ', 'EY': 'eɪ', 'F': 'f', 'G': 'g',
+    'HH': 'h', 'IH': 'ɪ', 'IY': 'i', 'JH': 'dʒ', 'K': 'k',
+    'L': 'l', 'M': 'm', 'N': 'n', 'NG': 'ŋ', 'OW': 'oʊ',
+    'OY': 'ɔɪ', 'P': 'p', 'R': 'r', 'S': 's', 'SH': 'ʃ',
+    'T': 't', 'TH': 'θ', 'UH': 'ʊ', 'UW': 'u', 'V': 'v',
+    'W': 'w', 'Y': 'j', 'Z': 'z', 'ZH': 'ʒ'
+}
+
+def arpabet_to_ipa(phones: str) -> str:
+    """将 ARPAbet 音标字符串转为近似 IPA"""
+    tokens = phones.split()
+    result = ""
+    for t in tokens:
+        base = t.rstrip('012')  # 去掉重音标记
+        result += _ARPABET_TO_IPA.get(base, base)
+    return result
+
+
+def parse_offline_meanings(word: str, meaning_result) -> list:
+    """
+    解析 PyMultiDictionary 的 meaning 结果，提取结构化 definition。
+    返回: [{"partOfSpeech": "verb", "definitions": [{"definition": "...", "example": "", "definitionZh": ""}]}]
+    """
+    parts_of_speech, definitions_text, _ = meaning_result
+    
+    if not definitions_text or len(definitions_text) < 10:
+        return []
+    
+    # 按句号分割
+    raw_sentences = [s.strip() for s in definitions_text.split('.') if s.strip()]
+    
+    # 去掉模板前缀
+    patterns = [
+        rf"The first definition of {re.escape(word)} in the dictionary is\s*",
+        rf"Other definition of {re.escape(word)} is\s*",
+        rf"{re.escape(word)} is also\s*",
+        rf"The definition of {re.escape(word)} in the dictionary is\s*",
+    ]
+    
+    definitions = []
+    for sentence in raw_sentences:
+        clean = sentence
+        for p in patterns:
+            clean = re.sub(p, "", clean, flags=re.IGNORECASE)
+        clean = clean.strip(" ;")
+        if clean and len(clean) > 3:
+            definitions.append({"definition": clean, "example": "", "definitionZh": ""})
+    
+    if not definitions:
+        return []
+    
+    # 按词性组织（PyMultiDictionary 可能返回多个词性，但释义是混在一起的）
+    # 简单处理：取第一个词性，所有 definition 放在下面
+    pos = parts_of_speech[0].lower() if parts_of_speech else "definition"
+    return [{
+        "partOfSpeech": pos,
+        "definitions": definitions[:3]
+    }]
+
+
+def get_word_phonetic(word: str) -> str:
+    """用 pronouncing 库获取音标（IPA 近似）"""
+    phones_list = pronouncing.phones_for_word(word)
+    if phones_list:
+        return "/" + arpabet_to_ipa(phones_list[0]) + "/"
+    return ""
 
 
 def cache_key(text: str, source: str, target: str) -> str:
@@ -174,58 +259,30 @@ async def translate(req: TranslateRequest):
 @app.post("/dict")
 async def dict_lookup(req: DictLookupRequest):
     """
-    查词接口：调用免费词典 API + Google 翻译（单词+释义）
-    返回合并后的单词信息
+    查词接口：PyMultiDictionary 离线词典 + pronouncing 音标 + Google 翻译
+    无需外部网络请求（除首次 Google 翻译外，有缓存）
     """
     word = req.word.lower().strip()
 
-    # 1. 免费词典 API
-    dict_data = None
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}")
-            if resp.status_code == 200:
-                dict_data = resp.json()
-    except Exception:
-        pass
-
-    # 2. 组装英文释义结构
+    # 1. 离线查词（PyMultiDictionary）
+    offline_dict = get_offline_dict()
+    meaning_result = offline_dict.meaning('en', word)
+    meanings = parse_offline_meanings(word, meaning_result)
+    
+    # 2. 音标（pronouncing）
+    phonetic = get_word_phonetic(word)
+    
+    # 3. 组装结果
     result = {
         "word": word,
-        "phonetic": "",
-        "audio": "",
-        "meanings": [],
+        "phonetic": phonetic,
+        "audio": "",  # 离线库不提供音频，前端可 fallback 到 edge-tts 朗读单词
+        "meanings": meanings,
         "chineseTranslation": "",
-        "source": "dict"
+        "source": "offline"
     }
 
-    if dict_data and len(dict_data) > 0:
-        entry = dict_data[0]
-        result["word"] = entry.get("word", word)
-        result["phonetic"] = entry.get("phonetic", "")
-        if not result["phonetic"] and entry.get("phonetics"):
-            for p in entry["phonetics"]:
-                if p.get("text"):
-                    result["phonetic"] = p["text"]
-                    break
-        if entry.get("phonetics"):
-            for p in entry["phonetics"]:
-                if p.get("audio"):
-                    result["audio"] = p["audio"]
-                    break
-        if entry.get("meanings"):
-            result["meanings"] = [
-                {
-                    "partOfSpeech": m.get("partOfSpeech", ""),
-                    "definitions": [
-                        {"definition": d.get("definition", ""), "example": d.get("example", ""), "definitionZh": ""}
-                        for d in m.get("definitions", [])[:3]
-                    ]
-                }
-                for m in entry["meanings"]
-            ]
-
-    # 3. Google 翻译：单词 + 所有释义 definition，拼接成一段一次性翻译
+    # 4. Google 翻译：单词 + 所有释义 definition，拼接成一段一次性翻译
     texts_to_translate = [word]
     definition_positions = []
 
